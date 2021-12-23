@@ -1,0 +1,2161 @@
+type: edu
+files:
+- name: build.gradle
+  visible: true
+  text: |-
+    plugins {
+        id 'java'
+        id 'org.springframework.boot' version '2.3.1.RELEASE'
+        id 'io.spring.dependency-management' version '1.0.9.RELEASE'
+    }
+
+    repositories {
+        mavenCentral()
+    }
+
+    sourceSets.main.resources.srcDirs = ["src/resources"]
+
+    dependencies {
+        implementation 'org.springframework.boot:spring-boot-starter'
+        implementation 'org.springframework.boot:spring-boot-starter-actuator'
+        implementation 'org.springframework.boot:spring-boot-starter-web'
+        implementation group: 'org.hibernate', name: 'hibernate-validator', version: '6.1.0.Final'
+        implementation 'org.springframework.boot:spring-boot-starter-security'
+        runtimeOnly 'com.h2database:h2'
+        implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    }
+  learner_created: false
+- name: src/account/AccountServiceApplication.java
+  visible: true
+  text: |-
+    package account;
+
+    import org.springframework.boot.SpringApplication;
+    import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+    @SpringBootApplication
+    public class AccountServiceApplication {
+
+        public static void main(String[] args) {
+            SpringApplication.run(AccountServiceApplication.class, args);
+        }
+
+    }
+  learner_created: false
+- name: src/resources/application.properties
+  visible: true
+  text: |-
+    server.port=28852
+    server.error.include-message=always
+    management.endpoints.web.exposure.include=*
+    management.endpoint.shutdown.enabled=true
+    spring.jackson.serialization.INDENT_OUTPUT=true
+
+    spring.datasource.url=jdbc:h2:file:../service_db
+    spring.datasource.driverClassName=org.h2.Driver
+    spring.datasource.username=sa
+    spring.datasource.password=password
+
+    spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+    spring.jpa.hibernate.ddl-auto=update
+
+    spring.h2.console.enabled=true
+    spring.h2.console.settings.trace=false
+    spring.h2.console.settings.web-allow-others=false
+  learner_created: false
+- name: src/account/cfg/BCryptEncoderConfig.java
+  visible: true
+  text: |+
+    package account.cfg;
+
+    import org.springframework.context.annotation.Bean;
+    import org.springframework.context.annotation.Configuration;
+    import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+
+    @Configuration
+    public class BCryptEncoderConfig {
+        @Bean
+        public BCryptPasswordEncoder bCryptPasswordEncoder() {
+            return new BCryptPasswordEncoder(13);
+        }
+    }
+
+  learner_created: false
+- name: src/account/controller/EmplController.java
+  visible: true
+  text: |+
+    package account.controller;
+
+    import account.entity.Salaries;
+    import account.entity.User;
+    import account.exceptions.DefaultException;
+    import account.payload.PaymentResponse;
+    import account.service.SalaryService;
+    import account.service.UserServiceImpl;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.http.ResponseEntity;
+    import org.springframework.web.bind.annotation.GetMapping;
+    import org.springframework.web.bind.annotation.RequestMapping;
+    import org.springframework.web.bind.annotation.RequestParam;
+    import org.springframework.web.bind.annotation.RestController;
+
+    import java.security.Principal;
+    import java.time.LocalDate;
+    import java.time.YearMonth;
+    import java.time.format.DateTimeFormatter;
+    import java.util.ArrayList;
+    import java.util.List;
+    import java.util.Map;
+    import java.util.Objects;
+
+    @RestController
+    @RequestMapping("/api")
+    public class EmplController {
+
+        private final UserServiceImpl userService;
+        private final SalaryService salaryService;
+
+        @Autowired
+        public EmplController(SalaryService salaryService, UserServiceImpl service) {
+            this.salaryService = salaryService;
+            this.userService = service;
+        }
+
+        @GetMapping("/empl/payment")
+        public ResponseEntity<Object> getEmployee(@Autowired Principal principal,
+                                                  @RequestParam(required = false) Map<String,String> params) {
+            User user = userService.findByUserName(principal.getName().toLowerCase());
+            if (params.size() == 0) {
+                List<Salaries> salariesList = salaryService.findAllByEmployee(principal.getName().toLowerCase());
+                List<PaymentResponse> paymentResponseList = new ArrayList<>();
+                for (Salaries sal : salariesList) {
+                    paymentResponseList.add(new PaymentResponse(user.getName(), user.getLastname(),
+                            sal.getPeriod(), sal.getSalary()));
+                }
+                return new ResponseEntity<>(Objects.requireNonNullElse(paymentResponseList, "[]"), HttpStatus.OK);
+            } else if (params.size() == 1) {
+                Map.Entry<String,String> entry = params.entrySet().iterator().next();
+                if (!entry.getKey().equalsIgnoreCase("period")) {
+                    throw new DefaultException();
+                }
+                String value = entry.getValue();
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("MM-yyyy");
+                try {
+                    YearMonth ym = YearMonth.parse(value, formatter);
+                    LocalDate date = ym.atEndOfMonth();
+                    Salaries salaries = salaryService.findByUsernameAndPeriod(principal.getName().toLowerCase(),
+                            date);
+                    PaymentResponse paymentResponse = new PaymentResponse(user.getName(), user.getLastname(),
+                            date, salaries.getSalary());
+                    return new ResponseEntity<>(Objects.requireNonNullElse(paymentResponse, "{}"), HttpStatus.OK);
+                } catch (Exception e) {
+                    throw new DefaultException();
+                }
+            } else {
+                throw new DefaultException();
+            }
+        }
+    }
+
+  learner_created: false
+- name: src/account/controller/AuthController.java
+  visible: true
+  text: |-
+    package account.controller;
+
+    import account.dto.UserDTO;
+    import account.entity.SecurityLogs;
+    import account.entity.User;
+    import account.payload.ChangeRequest;
+    import account.payload.ChangeResponse;
+    import account.service.LoggerService;
+    import account.service.UserServiceImpl;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.http.ResponseEntity;
+    import org.springframework.web.bind.annotation.*;
+
+    import javax.validation.Valid;
+    import java.security.Principal;
+    import java.util.stream.Collectors;
+
+    import static org.springframework.http.MediaType.APPLICATION_JSON_VALUE;
+
+    @RestController
+    @RequestMapping("/api/auth")
+    public class AuthController {
+
+        private final UserServiceImpl userService;
+        private LoggerService logger;
+
+        @Autowired
+        public AuthController(UserServiceImpl service, LoggerService logger) {
+            this.userService = service;
+            this.logger = logger;
+        }
+
+
+        @PostMapping(path = "/signup", consumes = APPLICATION_JSON_VALUE)
+        public ResponseEntity<UserDTO> registerNewUser(@Valid @RequestBody UserDTO userDTO) {
+            Long userId = userService.registerNewUser(userDTO.getName(), userDTO.getLastname(), userDTO.getEmail(), userDTO.getPassword());
+            User user = userService.findByUserName(userDTO.getEmail());
+            userDTO.setId(userId);
+            userDTO.setRoles(user.getUserGroups().stream().map(x -> x.getCode()).sorted().collect(Collectors.toList()));
+            logger.saveEvent(new SecurityLogs("CREATE_USER", "Anonymous", userDTO.getEmail().toLowerCase(),
+                    "/api/auth/signup"));
+            return new ResponseEntity<>(userDTO, HttpStatus.OK);
+        }
+
+        @PostMapping(path = "/changepass", consumes = APPLICATION_JSON_VALUE)
+        public ResponseEntity<ChangeResponse> updatePassword(@Autowired Principal principal,
+                                                             @Valid @RequestBody ChangeRequest passChange) {
+            userService.updateUserPassword(principal.getName(), passChange.getNew_password());
+            ChangeResponse resp = new ChangeResponse();
+            resp.setEmail(principal.getName());
+            resp.setStatus("The password has been updated successfully");
+            logger.saveEvent(new SecurityLogs("CHANGE_PASSWORD", principal.getName(),
+                    principal.getName(), "/api/auth/changepass"));
+            return new ResponseEntity<>(resp, HttpStatus.OK);
+        }
+
+    }
+  learner_created: false
+- name: src/account/entity/User.java
+  visible: true
+  text: |
+    package account.entity;
+
+    import com.fasterxml.jackson.annotation.JsonIgnore;
+    import com.fasterxml.jackson.annotation.JsonProperty;
+    import org.springframework.security.core.GrantedAuthority;
+    import org.springframework.security.core.authority.SimpleGrantedAuthority;
+    import org.springframework.security.core.userdetails.UserDetails;
+
+    import javax.persistence.*;
+    import java.util.*;
+
+    @Entity
+    @Table(name = "user")
+    public class User implements UserDetails {
+        @Id
+        @GeneratedValue(strategy = GenerationType.IDENTITY)
+        private Long id;
+        @Column(nullable = false)
+        private String name;
+        @Column(nullable = false)
+        private String lastname;
+        @Column(unique = true)
+        private String username;
+        @Column(length = 3000)
+        private String password;
+        @Column()
+        private int failedAttempt = 0;
+        @Column()
+        private boolean accountNonLocked = true;
+
+        public User() {
+        }
+
+        public User(String name, String lastname, String username, String password) {
+            this.name = name;
+            this.lastname = lastname;
+            this.username = username;
+            this.password = password;
+        }
+
+        @ManyToMany(fetch = FetchType.EAGER, cascade = {
+                CascadeType.PERSIST,
+                CascadeType.MERGE
+        })
+        @JoinTable(name = "user_groups",
+                joinColumns =@JoinColumn(name = "customer_id"),
+                inverseJoinColumns = @JoinColumn(name = "group_id"
+                ))
+        private Set<Group> userGroups= new HashSet<>();
+
+        public void addUserGroups(Group group){
+            userGroups.add(group);
+            group.getUsers().add(this);
+        }
+
+        public void removeUserGroups(Group group){
+            userGroups.remove(group);
+            group.getUsers().remove(this);
+        }
+
+        public Set<Group> getUserGroups() {
+            return userGroups;
+        }
+
+        public void setUserGroups(Set<Group> userGroups) {
+            this.userGroups = userGroups;
+        }
+
+        public Long getId() {
+            return id;
+        }
+
+        public void setId(Long userId) {
+            this.id = userId;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public String getLastname() {
+            return lastname;
+        }
+
+        public void setLastname(String lastname) {
+            this.lastname = lastname;
+        }
+
+        public void setUsername(String username) {
+            this.username = username;
+        }
+
+        public void setPassword(String password) {
+            this.password = password;
+        }
+
+        @JsonIgnore
+        public int getFailedAttempt() {
+            return failedAttempt;
+        }
+
+        @JsonIgnore
+        public void setFailedAttempt(int failedAttempt) {
+            this.failedAttempt = failedAttempt;
+        }
+
+        @JsonIgnore
+        public void setAccountNonLocked(boolean accountNonLocked) {
+            this.accountNonLocked = accountNonLocked;
+        }
+
+        @JsonIgnore
+        @Override
+        public Collection<GrantedAuthority> getAuthorities() {
+            Collection<GrantedAuthority> authorities = new ArrayList<>(userGroups.size());
+            for(Group userGroup : userGroups){
+                authorities.add(new SimpleGrantedAuthority(userGroup.getCode().toUpperCase()));
+            }
+
+            return authorities;
+        }
+
+        @JsonIgnore
+        @JsonProperty(value = "password")
+        @Override
+        public String getPassword() {
+            return password;
+        }
+
+        @Override
+        public String getUsername() {
+            return this.username;
+        }
+
+        @JsonIgnore
+        @Override
+        public boolean isAccountNonExpired() {
+            return true;
+        }
+
+        @JsonIgnore
+        @Override
+        public boolean isAccountNonLocked() {
+            return this.accountNonLocked;
+        }
+
+        @JsonIgnore
+        @Override
+        public boolean isCredentialsNonExpired() {
+            return true;
+        }
+
+        @JsonIgnore
+        @Override
+        public boolean isEnabled() {
+            return true;
+        }
+    }
+  learner_created: false
+- name: src/account/dao/SalaryRepository.java
+  visible: true
+  text: |
+    package account.dao;
+
+    import account.entity.Salaries;
+    import account.entity.User;
+    import org.springframework.data.jpa.repository.JpaRepository;
+    import org.springframework.stereotype.Repository;
+
+    import java.time.LocalDate;
+    import java.util.List;
+    import java.util.Optional;
+
+    @Repository
+    public interface SalaryRepository extends JpaRepository<Salaries, Long> {
+        Optional<Salaries> findAllByUsername(String username);
+        Optional<Salaries> findByPeriod(LocalDate period);
+        Optional<Salaries> findByUsernameAndPeriod(String username, LocalDate period);
+        Optional<Salaries> findById(Long id);
+        Optional<List<Salaries>> findAllByUsernameIgnoreCaseOrderByPeriodDesc(String username);
+        Optional<List<Salaries>> findAllByUsernameIgnoreCaseOrderByPeriodAsc(String username);
+    }
+  learner_created: false
+- name: src/account/exceptions/PasswordDuplicateException.java
+  visible: true
+  text: |
+    package account.exceptions;
+
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.annotation.ResponseStatus;
+
+    @ResponseStatus(code = HttpStatus.BAD_REQUEST, reason = "The passwords must be different!")
+    public class PasswordDuplicateException extends RuntimeException { }
+  learner_created: false
+- name: src/account/exceptions/UserExistException.java
+  visible: true
+  text: |
+    package account.exceptions;
+
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.annotation.ResponseStatus;
+
+    @ResponseStatus(code = HttpStatus.BAD_REQUEST, reason = "User exist!")
+    public class UserExistException extends RuntimeException { }
+  learner_created: false
+- name: src/account/payload/DefaultResponse.java
+  visible: true
+  text: |+
+    package account.payload;
+
+    public class DefaultResponse {
+        String status;
+
+        public DefaultResponse(String status) {
+            this.status = status;
+        }
+
+        public String getStatus() {
+            return status;
+        }
+
+        public void setStatus(String status) {
+            this.status = status;
+        }
+    }
+
+  learner_created: false
+- name: src/account/entity/Salaries.java
+  visible: true
+  text: |
+    package account.entity;
+
+    import javax.persistence.*;
+    import java.time.LocalDate;
+
+    @Entity
+    @Table(name = "salaries", uniqueConstraints = @UniqueConstraint(columnNames = {"period", "username"}))
+    public class Salaries {
+        @Id
+        @GeneratedValue(strategy = GenerationType.IDENTITY)
+        private Long id;
+        @Column(name="period")
+        private LocalDate period;
+        @Column(name="username", nullable = false)
+        private String username;
+        @Column(name="salary", nullable = false)
+        private Long salary;
+
+        public Salaries() {
+        }
+
+        public LocalDate getPeriod() {
+            return period;
+        }
+
+        public void setPeriod(LocalDate date) {
+            this.period = date;
+        }
+
+        public Long getId() {
+            return id;
+        }
+
+        public void setId(Long id) {
+            this.id = id;
+        }
+
+
+        public String getUsername() {
+            return username;
+        }
+
+        public void setUsername(String username) {
+            this.username = username;
+        }
+
+        public Long getSalary() {
+            return salary;
+        }
+
+        public void setSalary(Long salary) {
+            this.salary = salary;
+        }
+    }
+  learner_created: false
+- name: src/account/security/PasswordCheck.java
+  visible: true
+  text: |
+    package account.security;
+
+    import account.exceptions.BreachedPasswordException;
+    import account.exceptions.PasswordLengthException;
+
+    import java.util.Arrays;
+
+    public class PasswordCheck {
+
+        static String[] breachedPass= new String[]{"PasswordForJanuary", "PasswordForFebruary", "PasswordForMarch",
+                "PasswordForApril", "PasswordForMay", "PasswordForJune",
+                "PasswordForJuly", "PasswordForAugust", "PasswordForSeptember",
+                "PasswordForOctober", "PasswordForNovember", "PasswordForDecember"};
+
+        public static void checkPassword(String password) {
+            if (password.length() < 12) {
+                throw new PasswordLengthException();
+            }
+
+            if (Arrays.asList(breachedPass).contains(password)) {
+                throw new BreachedPasswordException();
+            }
+        }
+
+    }
+  learner_created: false
+- name: src/account/exceptions/DefaultError.java
+  visible: true
+  text: |+
+    package account.exceptions;
+
+    public class DefaultError {
+        private String status;
+
+        public DefaultError(String status) {
+            this.status = status;
+        }
+
+        public String getStatus() {
+            return status;
+        }
+
+        public void setStatus(String status) {
+            this.status = status;
+        }
+    }
+
+  learner_created: false
+- name: src/account/exceptions/PasswordLengthException.java
+  visible: true
+  text: |-
+    package account.exceptions;
+
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.annotation.ResponseStatus;
+
+    @ResponseStatus(code = HttpStatus.BAD_REQUEST, reason = "Password length must be 12 chars minimum!")
+    public class PasswordLengthException extends RuntimeException { }
+  learner_created: false
+- name: src/account/service/SalaryService.java
+  visible: true
+  text: |
+    package account.service;
+
+    import account.exceptions.DefaultException;
+    import account.dao.SalaryRepository;
+    import account.entity.Salaries;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.dao.DataIntegrityViolationException;
+    import org.springframework.security.core.userdetails.UsernameNotFoundException;
+    import org.springframework.stereotype.Service;
+    import org.springframework.transaction.annotation.Transactional;
+
+    import java.time.LocalDate;
+    import java.util.ArrayList;
+    import java.util.List;
+
+    @Service
+    public class SalaryService {
+        private final SalaryRepository salaryRepository;
+
+        @Autowired
+        public SalaryService(SalaryRepository salaryRepository) {
+            this.salaryRepository = salaryRepository;
+        }
+
+        public List<Salaries> findAllByEmployee(String username) throws UsernameNotFoundException {
+            return salaryRepository.findAllByUsernameIgnoreCaseOrderByPeriodDesc(username)
+                    .orElse(new ArrayList<>());
+        }
+
+
+
+        public Salaries findByPeriod(LocalDate period) throws UsernameNotFoundException{
+            return salaryRepository.findByPeriod(period)
+                    .orElseThrow(() -> new UsernameNotFoundException(
+                            String.format("No payments %s found for period ", period)));
+        }
+
+        public Salaries findByUsernameAndPeriod(String username, LocalDate period) {
+            return salaryRepository.findByUsernameAndPeriod(username, period)
+                    .orElse(null);
+        }
+
+        @Transactional
+        public void addPayment(List<Salaries> salaries) {
+            for (Salaries s : salaries)
+                try {
+                    salaryRepository.save(s);
+                } catch (DataIntegrityViolationException e) {
+                    throw new DefaultException();
+                }
+        }
+    }
+  learner_created: false
+- name: src/account/dto/UserDTO.java
+  visible: true
+  text: |
+    package account.dto;
+
+    import com.fasterxml.jackson.annotation.JsonIgnore;
+    import com.fasterxml.jackson.annotation.JsonProperty;
+
+    import javax.validation.constraints.Email;
+    import javax.validation.constraints.NotEmpty;
+    import javax.validation.constraints.NotNull;
+    import java.util.Collections;
+    import java.util.List;
+
+    public class UserDTO {
+
+        private Long id;
+
+        @NotEmpty
+        private String name;
+        @NotEmpty
+        private String lastname;
+        @NotEmpty
+        @Email(regexp = ".+@acme.com", message = "User email is not correct")
+        private String email;
+        @NotNull(message = "Error password is null!")
+    //    @Size(min = 12, message = "Error password must contain at least 12 characters!")
+        private String password;
+        private List<String> roles;
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public String getLastname() {
+            return lastname;
+        }
+
+        public void setLastname(String lastname) {
+            this.lastname = lastname;
+        }
+
+        public Long getId() {
+            return id;
+        }
+
+        public void setId(Long id) {
+            this.id = id;
+        }
+
+        @JsonIgnore
+        @JsonProperty(value = "password")
+        public String getPassword() {
+            return password;
+        }
+
+        public void setPassword(String password) {
+            this.password = password;
+        }
+
+        public String getEmail() {
+            return email;
+        }
+
+        public void setEmail(String email) {
+            this.email = email.toLowerCase();
+        }
+
+        public List<String> getRoles() {
+            Collections.sort(roles);
+            return roles;
+        }
+
+        public void setRoles(List<String> roles) {
+            this.roles = roles;
+        }
+
+        public UserDTO() {
+        }
+
+        public UserDTO(String name, String lastname, String email, String password) {
+            this.name = name;
+            this.lastname = lastname;
+            this.email = email.toLowerCase();
+            this.password = password;
+        }
+
+        public UserDTO(Long id, String name, String lastname, String email) {
+            this.id = id;
+            this.name = name;
+            this.lastname = lastname;
+            this.email = email.toLowerCase();
+        }
+
+        public UserDTO(Long id, String name, String lastname, String email, List<String> groups) {
+            this.id = id;
+            this.name = name;
+            this.lastname = lastname;
+            this.email = email.toLowerCase();
+            this.roles = groups;
+        }
+
+    }
+  learner_created: false
+- name: src/account/exceptions/DefaultException.java
+  visible: true
+  text: |+
+    package account.exceptions;
+
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.annotation.ResponseStatus;
+
+    @ResponseStatus(code = HttpStatus.BAD_REQUEST, reason = "Error!")
+    public class DefaultException extends RuntimeException {
+
+    }
+
+  learner_created: false
+- name: src/account/payload/PaymentResponse.java
+  visible: true
+  text: |+
+    package account.payload;
+
+    import java.time.LocalDate;
+    import java.time.format.DateTimeFormatter;
+    import java.util.Locale;
+
+    public class PaymentResponse {
+        String name;
+        String lastname;
+        String email;
+        String period;
+        String salary;
+
+        public PaymentResponse() {
+        }
+
+        public PaymentResponse(String name, String lastname, LocalDate period, Long salaryLong) {
+            this.name = name;
+            this.lastname = lastname;
+            this.period = convertPeriod(period);
+            this.salary = convertSalary(salaryLong);
+        }
+
+        private String convertPeriod(LocalDate period) {
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("MMMM-yyyy", new Locale("en"));
+            return period.format(formatter);
+        }
+
+        private String convertSalary(Long salaryLong) {
+            String dollars = String.valueOf(salaryLong / 100L);
+            String cents = String.valueOf(salaryLong % 100L);
+            return dollars + " dollar(s) " + cents + " cent(s)";
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public String getLastname() {
+            return lastname;
+        }
+
+        public void setLastname(String lastname) {
+            this.lastname = lastname;
+        }
+
+        public String getPeriod() {
+            return period;
+        }
+
+        public void setPeriod(String period) {
+            this.period = period;
+        }
+
+        public String getSalary() {
+            return salary;
+        }
+
+        public void setSalary(String salary) {
+            this.salary = salary;
+        }
+    }
+
+  learner_created: false
+- name: src/account/payload/ChangeResponse.java
+  visible: true
+  text: |
+    package account.payload;
+
+    public class ChangeResponse {
+        String email;
+        String status;
+
+        public ChangeResponse() {
+        }
+
+        public ChangeResponse(String email, String status) {
+            this.email = email;
+            this.status = status;
+        }
+
+        public String getEmail() {
+            return email;
+        }
+
+        public void setEmail(String email) {
+            this.email = email;
+        }
+
+        public String getStatus() {
+            return status;
+        }
+
+        public void setStatus(String status) {
+            this.status = status;
+        }
+    }
+  learner_created: false
+- name: src/account/dto/SalaryDTO.java
+  visible: true
+  text: |
+    package account.dto;
+
+    import javax.validation.constraints.Min;
+    import javax.validation.constraints.NotEmpty;
+    import javax.validation.constraints.Pattern;
+
+    public class SalaryDTO {
+        private Long id;
+        @NotEmpty
+        @Pattern(regexp="^(1[0-2]|0[1-9])-\\d{4}$", message = "Wrong date!")
+        private String period;
+        @NotEmpty
+        private String employee;
+        @Min(value = 0, message = "Salary must be non negative!")
+        private Long salary;
+
+        public SalaryDTO() {
+        }
+
+        public SalaryDTO(Long id, String period, String username, Long salary) {
+            this.id = id;
+            this.period = period;
+            this.employee = username;
+            this.salary = salary;
+        }
+
+        public Long getId() {
+            return id;
+        }
+
+        public void setId(Long id) {
+            this.id = id;
+        }
+
+        public String getPeriod() {
+            return period;
+        }
+
+        public void setPeriod(String period) {
+            this.period = period;
+        }
+
+        public String getEmployee() {
+            return employee;
+        }
+
+        public void setEmployee(String employee) {
+            this.employee = employee;
+        }
+
+        public Long getSalary() {
+            return salary;
+        }
+
+        public void setSalary(Long salary) {
+            this.salary = salary;
+        }
+    }
+  learner_created: false
+- name: src/account/exceptions/BreachedPasswordException.java
+  visible: true
+  text: |
+    package account.exceptions;
+
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.annotation.ResponseStatus;
+
+    //@ResponseStatus(code = HttpStatus.BAD_REQUEST, reason = "The password is in the hacker's database!")
+    @ResponseStatus(code = HttpStatus.BAD_REQUEST, reason = "The password is in the hacker's database!")
+    public class BreachedPasswordException extends RuntimeException { }
+  learner_created: false
+- name: src/account/exceptions/CustomExceptionHandler.java
+  visible: true
+  text: |
+    package account.exceptions;
+
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.MethodArgumentNotValidException;
+    import org.springframework.web.bind.annotation.ControllerAdvice;
+    import org.springframework.web.bind.annotation.ExceptionHandler;
+
+    import javax.servlet.http.HttpServletResponse;
+    import javax.validation.ConstraintViolationException;
+    import java.io.IOException;
+
+
+    @ControllerAdvice
+    public class CustomExceptionHandler {
+
+        @ExceptionHandler(ConstraintViolationException.class)
+        public void handle(HttpServletResponse response, ConstraintViolationException ex) throws IOException {
+            response.sendError(HttpStatus.BAD_REQUEST.value());
+        }
+
+        @ExceptionHandler(MethodArgumentNotValidException.class)
+        public void handleExc(HttpServletResponse response) throws IOException {
+            response.sendError(HttpStatus.BAD_REQUEST.value());
+        }
+    }
+  learner_created: false
+- name: src/account/controller/SalaryController.java
+  visible: true
+  text: |-
+    package account.controller;
+
+    import account.dto.SalaryDTO;
+    import account.entity.Salaries;
+    import account.exceptions.DefaultException;
+    import account.payload.DefaultResponse;
+    import account.service.SalaryService;
+    import account.service.UserServiceImpl;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.http.ResponseEntity;
+    import org.springframework.validation.annotation.Validated;
+    import org.springframework.web.bind.annotation.*;
+
+    import javax.validation.Valid;
+    import java.time.LocalDate;
+    import java.time.YearMonth;
+    import java.time.format.DateTimeFormatter;
+    import java.util.ArrayList;
+    import java.util.List;
+
+    import static org.springframework.http.MediaType.APPLICATION_JSON_VALUE;
+
+    @Validated
+    @RestController
+    @RequestMapping("/api")
+    public class SalaryController {
+
+        private final SalaryService salaryService;
+        private final UserServiceImpl userService;
+
+        @Autowired
+        public SalaryController(SalaryService salaryService, UserServiceImpl service) {
+            this.salaryService = salaryService;
+            this.userService = service;
+        }
+
+        @PostMapping(path = "/acct/payments")
+        public ResponseEntity<DefaultResponse> addPayments(@RequestBody List<@Valid SalaryDTO> payments) {
+
+            List<Salaries> salaries = new ArrayList<>();
+
+            for (SalaryDTO payment : payments) {
+                Salaries salary = new Salaries();
+                salary.setSalary(payment.getSalary());
+                salary.setUsername(payment.getEmployee().toLowerCase());
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("MM-yyyy");
+                YearMonth ym = YearMonth.parse(payment.getPeriod(), formatter);
+                LocalDate date = ym.atEndOfMonth();
+                salary.setPeriod(date);
+                userService.findByUserName(payment.getEmployee().toLowerCase());
+                if (salaryService.findByUsernameAndPeriod(payment.getEmployee().toLowerCase(), date) != null) {
+                    throw new DefaultException();
+                }
+                salaries.add(salary);
+            }
+            salaryService.addPayment(salaries);
+            return new ResponseEntity<>(new DefaultResponse("Successfully added!"), HttpStatus.OK);
+        }
+
+        @PutMapping(path = "/acct/payments", consumes = APPLICATION_JSON_VALUE)
+        public ResponseEntity<DefaultResponse> updatePayments(@RequestBody @Valid SalaryDTO payment) {
+            try {
+                List<Salaries> salaries = new ArrayList<>();
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("MM-yyyy");
+                YearMonth ym = YearMonth.parse(payment.getPeriod(), formatter);
+                LocalDate date = ym.atEndOfMonth();
+                Salaries salary = salaryService.findByUsernameAndPeriod(payment.getEmployee().toLowerCase(), date);
+                salary.setSalary(payment.getSalary());
+                salaries.add(salary);
+                salaryService.addPayment(salaries);
+                return new ResponseEntity<>(new DefaultResponse("Successfully updated!"), HttpStatus.OK);
+            } catch (Exception e) {
+                throw new DefaultException();
+            }
+        }
+    }
+  learner_created: false
+- name: src/account/service/UserServiceImpl.java
+  visible: true
+  text: |
+    package account.service;
+
+    import account.dao.GroupRepository;
+    import account.dao.UserRepository;
+    import account.entity.User;
+    import account.exceptions.CustomNotFoundException;
+    import account.exceptions.PasswordDuplicateException;
+    import account.exceptions.UserExistException;
+    import account.security.PasswordCheck;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.dao.DataIntegrityViolationException;
+    import org.springframework.security.core.userdetails.UserDetails;
+    import org.springframework.security.core.userdetails.UserDetailsService;
+    import org.springframework.security.core.userdetails.UsernameNotFoundException;
+    import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+    import org.springframework.stereotype.Service;
+
+    import java.util.ArrayList;
+    import java.util.List;
+
+    @Service
+    public class UserServiceImpl implements UserDetailsService {
+        private final UserRepository userRepository;
+        private final GroupRepository groupRepository;
+        private final BCryptPasswordEncoder encoder;
+
+        @Autowired
+        public UserServiceImpl(UserRepository userRepository, GroupRepository groupRepository, BCryptPasswordEncoder encoder) {
+            this.userRepository = userRepository;
+            this.groupRepository = groupRepository;
+            this.encoder = encoder;
+        }
+
+        @Override
+        public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+            return userRepository.findByUsername(username.toLowerCase())
+                    .orElseThrow(() -> new UsernameNotFoundException(
+                            String.format("No user %s found", username)));
+        }
+
+
+
+        public User findById(Long userId) throws UsernameNotFoundException{
+            return userRepository.findById(userId)
+                    .orElseThrow(() -> new UsernameNotFoundException(
+                            String.format("No user %s found for id", userId)));
+        }
+
+        public User findByUserName(String name) throws UsernameNotFoundException{
+            return userRepository.findByUsername(name.toLowerCase())
+                    .orElseThrow(() -> new CustomNotFoundException("User not found!"));
+        }
+
+        public Long registerNewUser(String name, String lastname, String username, String password) {
+            PasswordCheck.checkPassword(password);
+            String encodedPassword = encoder.encode(password);
+            User user = new User(name, lastname, username.toLowerCase(), encodedPassword);
+            if (findAllUsers().size() == 0) {
+                user.addUserGroups(groupRepository.findByCode("ROLE_ADMINISTRATOR"));
+            } else {
+                user.addUserGroups(groupRepository.findByCode("ROLE_USER"));
+            }
+            try {
+                return userRepository.save(user).getId();
+            } catch (DataIntegrityViolationException e) {
+                throw new UserExistException();
+            }
+        }
+
+        public void updateUserPassword(String username, String new_password) {
+            User user = findByUserName(username);
+            if (encoder.matches(new_password, user.getPassword())) {
+                throw new PasswordDuplicateException();
+            }
+            PasswordCheck.checkPassword(new_password);
+            String encodedPassword = encoder.encode(new_password);
+            user.setPassword(encodedPassword);
+            try {
+                userRepository.save(user);
+            } catch (DataIntegrityViolationException e) {
+                throw new UserExistException();
+            }
+        }
+
+        public List<User> findAllUsers() throws UsernameNotFoundException {
+            return userRepository.findAllByOrderByIdAsc()
+                    .orElse(new ArrayList<>());
+        }
+
+        public void deleteUser(Long id) {
+            userRepository.deleteById(id);
+        }
+
+        public void save(User user) {
+            userRepository.save(user);
+        }
+
+        public void increaseFailedAttempts(String username) {
+            User user = findByUserName(username.toLowerCase());
+            user.setFailedAttempt(user.getFailedAttempt() + 1);
+            userRepository.save(user);
+        }
+
+        public void resetFailedAttempts(String username) {
+            User user = findByUserName(username.toLowerCase());
+            user.setFailedAttempt(0);
+            userRepository.save(user);
+        }
+
+        public void lock(String username) {
+            User user = findByUserName(username.toLowerCase());
+            user.setAccountNonLocked(false);
+            userRepository.save(user);
+        }
+
+        public void unlock(String username) {
+            User user = findByUserName(username.toLowerCase());
+            user.setAccountNonLocked(true);
+            user.setFailedAttempt(0);
+            userRepository.save(user);
+        }
+    }
+  learner_created: false
+- name: src/account/payload/ChangeRequest.java
+  visible: true
+  text: |+
+    package account.payload;
+
+    public class ChangeRequest {
+        String new_password;
+
+        public ChangeRequest() {
+        }
+
+        public ChangeRequest(String new_password) {
+            this.new_password = new_password;
+        }
+
+        public String getNew_password() {
+            return new_password;
+        }
+
+        public void setNew_password(String new_password) {
+            this.new_password = new_password;
+        }
+    }
+
+  learner_created: false
+- name: src/account/cfg/WebSecurityConfig.java
+  visible: true
+  text: |-
+    package account.cfg;
+
+    import account.entity.SecurityLogs;
+    import account.security.RestAuthenticationEntryPoint;
+    import account.service.LoggerService;
+    import account.service.UserServiceImpl;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.http.HttpMethod;
+    import org.springframework.security.access.AccessDeniedException;
+    import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
+    import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+    import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+    import org.springframework.security.config.annotation.web.configuration.WebSecurityConfigurerAdapter;
+    import org.springframework.security.config.http.SessionCreationPolicy;
+    import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+    import org.springframework.security.web.access.AccessDeniedHandler;
+
+    import javax.servlet.ServletException;
+    import javax.servlet.http.HttpServletRequest;
+    import javax.servlet.http.HttpServletResponse;
+    import java.io.IOException;
+
+    @EnableWebSecurity
+    public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
+        private final BCryptPasswordEncoder encoder;
+        private final UserServiceImpl userService;
+        private final CustomAccessDeniedHandler customAccessDeniedHandler = new CustomAccessDeniedHandler();
+        private final LoggerService logger;
+
+        @Autowired
+        public WebSecurityConfig(BCryptPasswordEncoder encoder,
+                                 UserServiceImpl userService, LoggerService logger) {
+            this.encoder = encoder;
+            this.userService = userService;
+            this.logger = logger;
+        }
+
+        @Override
+        protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+            auth.userDetailsService(userService).passwordEncoder(encoder);
+        }
+
+        public void configure(HttpSecurity http) throws Exception {
+            http.httpBasic()
+                    .authenticationEntryPoint(new RestAuthenticationEntryPoint())
+                    .and()
+                    .csrf().disable().headers().frameOptions().disable()
+                    .and()
+                    .exceptionHandling()
+    //                .authenticationEntryPoint(new RestAuthenticationEntryPoint())
+                    .accessDeniedHandler(customAccessDeniedHandler)
+                    .and()
+                    .authorizeRequests()
+                    .antMatchers("/api/security/events/**")
+                    .hasAnyAuthority("ROLE_AUDITOR")
+                    .antMatchers( "/api/auth/changepass/**")
+                    .hasAnyAuthority("ROLE_USER", "ROLE_ACCOUNTANT", "ROLE_ADMINISTRATOR")
+                    .antMatchers("/api/empl/payment/**")
+                    .hasAnyAuthority("ROLE_USER", "ROLE_ACCOUNTANT")
+                    .antMatchers("/api/admin/user/**")
+                    .hasAnyAuthority("ROLE_ADMINISTRATOR")
+                    .antMatchers("/api/acct/payments/**")
+                    .hasAnyAuthority("ROLE_ACCOUNTANT")
+    //                .authenticated()
+                    .antMatchers(HttpMethod.POST, "/api/auth/signup").permitAll()
+                    .and()
+                    .sessionManagement()
+                    .sessionCreationPolicy(SessionCreationPolicy.STATELESS);
+        }
+
+        public class CustomAccessDeniedHandler implements AccessDeniedHandler {
+
+            @Override
+            public void handle(
+                    HttpServletRequest request, HttpServletResponse response,
+                    AccessDeniedException exc) throws IOException, ServletException {
+                logger.saveEvent(new SecurityLogs("ACCESS_DENIED", request.getRemoteUser(),
+                        request.getServletPath(), request.getServletPath()));
+                response.sendError(HttpServletResponse.SC_FORBIDDEN, "Access Denied!");
+            }
+        }
+    }
+  learner_created: false
+- name: src/account/dao/UserRepository.java
+  visible: true
+  text: |
+    package account.dao;
+
+    import account.entity.User;
+    import org.springframework.data.jpa.repository.JpaRepository;
+    import org.springframework.stereotype.Repository;
+
+    import java.util.List;
+    import java.util.Optional;
+
+    @Repository
+    public interface UserRepository extends JpaRepository<User, Long> {
+        Optional<User> findByUsername(String username);
+        Optional<User> findById(Long userId);
+        Optional<List<User>> findAllByOrderByIdAsc();
+
+    }
+  learner_created: false
+- name: src/account/controller/AdminController.java
+  visible: true
+  text: |
+    package account.controller;
+
+    import account.dao.GroupRepository;
+    import account.dto.UserDTO;
+    import account.entity.Group;
+    import account.entity.SecurityLogs;
+    import account.entity.User;
+    import account.exceptions.CustomBadRequestException;
+    import account.exceptions.CustomNotFoundException;
+    import account.payload.ChangeAccessRequest;
+    import account.payload.ChangeRoleRequest;
+    import account.payload.DefaultResponse;
+    import account.payload.DeleteUserResponse;
+    import account.service.LoggerService;
+    import account.service.UserServiceImpl;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.http.ResponseEntity;
+    import org.springframework.web.bind.annotation.*;
+
+    import javax.validation.Valid;
+    import java.security.Principal;
+    import java.util.ArrayList;
+    import java.util.List;
+    import java.util.Set;
+    import java.util.stream.Collectors;
+
+    @RestController
+    @RequestMapping("/api/admin")
+    public class AdminController {
+
+        private final UserServiceImpl userService;
+        private final GroupRepository groupRepository;
+        private final LoggerService logger;
+        private Set<String> SERVICE_USERS = Set.of("ROLE_ADMINISTRATOR");
+        private Set<String> BUSINESS_USERS = Set.of("ROLE_ACCOUNTANT", "ROLE_USER", "ROLE_AUDITOR");
+
+        @Autowired
+        public AdminController(UserServiceImpl service, GroupRepository groupRepository, LoggerService logger) {
+            this.groupRepository = groupRepository;
+            this.userService = service;
+            this.logger = logger;
+        }
+
+        @GetMapping("/user")
+        public ResponseEntity<Object> getAllUsers() {
+            List<UserDTO> userDTOList = new ArrayList<>();
+            for (User user : userService.findAllUsers()) {
+                userDTOList.add(new UserDTO(user.getId(), user.getName(), user.getLastname(), user.getUsername(),
+                        user.getUserGroups().stream().map(x -> x.getCode()).sorted().collect(Collectors.toList()))
+                );
+            }
+            return new ResponseEntity<>(userDTOList, HttpStatus.OK);
+        }
+
+        @DeleteMapping("/user/{username}")
+        public ResponseEntity<Object> deleteUser(@PathVariable String username, @Autowired Principal principal) {
+            User user = userService.findByUserName(username);
+            if (user == null) {
+                throw new CustomNotFoundException("User not found!");
+            }
+            for (Group group : user.getUserGroups()) {
+                if (group.getCode().equalsIgnoreCase("ROLE_ADMINISTRATOR")) {
+                    throw new CustomBadRequestException("Can't remove ADMINISTRATOR role!");
+                }
+            }
+            userService.deleteUser(user.getId());
+            logger.saveEvent(new SecurityLogs("DELETE_USER", principal.getName(),
+                    user.getUsername().toLowerCase(), "/api/admin/user"));
+            return new ResponseEntity<>(new DeleteUserResponse(user.getUsername(), "Deleted successfully!"),
+                    HttpStatus.OK);
+        }
+
+        @PutMapping(path = "/user/role")
+        public ResponseEntity<Object> setAcct(@Autowired Principal principal, @RequestBody @Valid ChangeRoleRequest req) {
+
+            Group groupReq = groupRepository.findByCode("ROLE_" + req.getRole().toUpperCase());
+            if (groupReq == null) {
+                throw new CustomNotFoundException("Role not found!");
+            }
+            User user = userService.findByUserName(req.getUser());
+            if (user == null) {
+                throw new CustomNotFoundException("User not found!");
+            }
+            String operation = req.getOperation().toUpperCase();
+            boolean isService = false;
+            boolean isBusiness = false;
+            switch (operation) {
+                case "GRANT":
+                    if (user.getUserGroups().contains(groupRepository.findByCode("ROLE_" + req.getRole().toUpperCase()))) {
+                        throw new CustomBadRequestException("Role already granted!");
+                    }
+                    user.addUserGroups(groupReq);
+                    for (Group group : user.getUserGroups()) {
+                        if (SERVICE_USERS.contains(group.getCode())) isService = true;
+                        if (BUSINESS_USERS.contains(group.getCode())) isBusiness = true;
+                    }
+                    if (isBusiness &&  isService) {
+                        throw new CustomBadRequestException("The user cannot combine administrative and business roles!");
+                    } else {
+                        logger.saveEvent(new SecurityLogs("GRANT_ROLE", principal.getName(),
+                                "Grant role " + req.getRole() + " to " + user.getUsername().toLowerCase(),
+                                "/api/admin/user/role"));
+                        userService.save(user);
+                    }
+                    break;
+                case "REMOVE":
+                    if (!user.getUserGroups().contains(groupRepository.findByCode("ROLE_" + req.getRole().toUpperCase()))) {
+                        throw new CustomBadRequestException("The user does not have a role!");
+                    }
+                    if (req.getRole().equalsIgnoreCase("ADMINISTRATOR")) {
+                        throw new CustomBadRequestException("Can't remove ADMINISTRATOR role!");
+                    }
+                    if (user.getUserGroups().size() == 1) {
+                        throw new CustomBadRequestException("The user must have at least one role!");
+                    }
+                    user.removeUserGroups(groupRepository.findByCode("ROLE_" + req.getRole().toUpperCase()));
+                    logger.saveEvent(new SecurityLogs("REMOVE_ROLE", principal.getName(),
+                            "Remove role " + req.getRole() + " from " + user.getUsername().toLowerCase(),
+                            "/api/admin/user/role"));
+                    userService.save(user);
+                    break;
+                default:
+                    throw new CustomNotFoundException("Operation not found!");
+
+            }
+            UserDTO userDto = new UserDTO(user.getId(), user.getName(), user.getLastname(), user.getUsername(),
+                    user.getUserGroups().stream().map(x -> x.getCode()).sorted().collect(Collectors.toList())
+            );
+
+            return new ResponseEntity<>(userDto, HttpStatus.OK);
+        }
+
+
+        @PutMapping(path = "/user/access")
+        public ResponseEntity<Object> setAcct(@Autowired Principal principal, @RequestBody ChangeAccessRequest req) {
+
+            User user = userService.findByUserName(req.getUser());
+            if (user == null) {
+                throw new CustomNotFoundException("User not found!");
+            }
+            DefaultResponse result = new DefaultResponse("Something wrong!");
+            String operation = req.getOperation().toUpperCase();
+            switch (operation) {
+                case "UNLOCK":
+                    userService.unlock(user.getUsername());
+                    logger.saveEvent(new SecurityLogs("UNLOCK_USER", principal.getName(),
+                            "Unlock user " + user.getUsername().toLowerCase(),
+                            "/api/admin/user/access"));
+                    result = new DefaultResponse("User " + user.getUsername() + " unlocked!");
+                    break;
+                case "LOCK":
+                    for (Group group : user.getUserGroups()) {
+                        if (group.getCode().equalsIgnoreCase("ROLE_ADMINISTRATOR")) {
+                            throw new CustomBadRequestException("Can't lock the ADMINISTRATOR!");
+                        }
+                    }
+                    userService.lock(user.getUsername());
+                    logger.saveEvent(new SecurityLogs("LOCK_USER", principal.getName(),
+                            "Lock user " + user.getUsername().toLowerCase(),
+                            "/api/admin/user/access"));
+                    result = new DefaultResponse("User " + user.getUsername() + " locked!");
+                    break;
+            }
+
+            return new ResponseEntity<>(result, HttpStatus.OK);
+        }
+
+    }
+  learner_created: false
+- name: src/account/dao/GroupRepository.java
+  visible: true
+  text: |
+    package account.dao;
+
+    import account.entity.Group;
+    import account.entity.User;
+    import org.springframework.data.jpa.repository.JpaRepository;
+    import org.springframework.stereotype.Repository;
+
+    import java.util.Optional;
+
+    @Repository
+    public interface GroupRepository extends JpaRepository<Group, Long>{
+        Optional<Group> findById(Long userId);
+        Group findByCode(String code);
+    }
+  learner_created: false
+- name: src/account/entity/Group.java
+  visible: true
+  text: |-
+    package account.entity;
+
+    import javax.persistence.*;
+    import java.util.Set;
+
+    @Entity
+    @Table(name = "principle_groups")
+    public class Group {
+
+        //removed getter and setter to save space
+        @Id
+        @GeneratedValue(strategy = GenerationType.IDENTITY)
+        private Long id;
+
+        public Group() {
+        }
+
+        public Group(String code) {
+            this.code = code;
+        }
+
+        @Column(unique = true, nullable = false)
+        private String code;
+        private String name;
+
+        @ManyToMany(mappedBy = "userGroups")
+        private Set<User> users;
+
+        public Long getId() {
+            return id;
+        }
+
+        public void setId(Long id) {
+            this.id = id;
+        }
+
+        public String getCode() {
+            return code;
+        }
+
+        public void setCode(String code) {
+            this.code = code;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public Set<User> getUsers() {
+            return users;
+        }
+
+        public void setUsers(Set<User> users) {
+            this.users = users;
+        }
+    }
+  learner_created: false
+- name: src/account/exceptions/CustomBadRequestException.java
+  visible: true
+  text: |
+    package account.exceptions;
+
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.annotation.ResponseStatus;
+
+    @ResponseStatus(code = HttpStatus.BAD_REQUEST)
+    public class CustomBadRequestException extends RuntimeException{
+        public CustomBadRequestException(String message) {
+            super(message);
+        }
+    }
+  learner_created: false
+- name: src/account/exceptions/CustomNotFoundException.java
+  visible: true
+  text: |
+    package account.exceptions;
+
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.annotation.ResponseStatus;
+
+    @ResponseStatus(code = HttpStatus.NOT_FOUND)
+    public class CustomNotFoundException extends RuntimeException{
+        public CustomNotFoundException(String message) {
+            super(message);
+        }
+    }
+  learner_created: false
+- name: src/account/fixtures/DataLoader.java
+  visible: true
+  text: |
+    package account.fixtures;
+
+    import account.dao.GroupRepository;
+    import account.entity.Group;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.stereotype.Component;
+
+    @Component
+    public class DataLoader {
+
+        private final GroupRepository groupRepository;
+
+        @Autowired
+        public DataLoader(GroupRepository groupRepository) {
+            this.groupRepository = groupRepository;
+            createRoles();
+        }
+
+        private void createRoles() {
+            try {
+                groupRepository.save(new Group("ROLE_ADMINISTRATOR"));
+                groupRepository.save(new Group("ROLE_AUDITOR"));
+                groupRepository.save(new Group("ROLE_USER"));
+                groupRepository.save(new Group("ROLE_ACCOUNTANT"));
+            } catch (Exception e) {
+
+            }
+        }
+    }
+  learner_created: false
+- name: src/account/payload/ChangeRoleRequest.java
+  visible: true
+  text: |
+    package account.payload;
+
+    public class ChangeRoleRequest {
+        private String user;
+        private String role;
+        private String operation;
+
+        public ChangeRoleRequest() {
+        }
+
+        public ChangeRoleRequest(String user, String role, String operation) {
+            this.user = user;
+            this.role = role;
+            this.operation = operation;
+        }
+
+        public String getOperation() {
+            return operation;
+        }
+
+        public void setOperation(String operation) {
+            this.operation = operation;
+        }
+
+        public String getUser() {
+            return user;
+        }
+
+        public void setUser(String user) {
+            this.user = user;
+        }
+
+        public String getRole() {
+            return role;
+        }
+
+        public void setRole(String role) {
+            this.role = role;
+        }
+    }
+  learner_created: false
+- name: src/account/payload/DeleteUserResponse.java
+  visible: true
+  text: |
+    package account.payload;
+
+    public class DeleteUserResponse {
+        private String user;
+        private String status;
+
+        public DeleteUserResponse(String user, String status) {
+            this.user = user;
+            this.status = status;
+        }
+
+        public DeleteUserResponse() {
+        }
+
+        public String getUser() {
+            return user;
+        }
+
+        public void setUser(String user) {
+            this.user = user;
+        }
+
+        public String getStatus() {
+            return status;
+        }
+
+        public void setStatus(String status) {
+            this.status = status;
+        }
+    }
+  learner_created: false
+- name: src/account/payload/UpdateUser.java
+  visible: true
+  text: |
+    package account.payload;
+
+    public class UpdateUser {
+        String email;
+        String role;
+        String operation;
+
+        public UpdateUser() {
+        }
+
+        public String getOperation() {
+            return operation;
+        }
+
+        public void setOperation(String operation) {
+            this.operation = operation;
+        }
+
+        public String getEmail() {
+            return email;
+        }
+
+        public void setEmail(String email) {
+            this.email = email;
+        }
+
+        public String getRole() {
+            return role;
+        }
+
+        public void setRole(String role) {
+            this.role = role;
+        }
+    }
+  learner_created: false
+- name: src/account/security/AuthenticationFailureEventListener.java
+  visible: true
+  text: |+
+    package account.security;
+
+    import account.entity.Group;
+    import account.entity.SecurityLogs;
+    import account.entity.User;
+    import account.exceptions.CustomNotFoundException;
+    import account.service.LoggerService;
+    import account.service.UserServiceImpl;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.context.ApplicationListener;
+    import org.springframework.security.authentication.event.AuthenticationFailureBadCredentialsEvent;
+    import org.springframework.stereotype.Component;
+
+    import javax.servlet.http.HttpServletRequest;
+
+    @Component
+    public class AuthenticationFailureEventListener implements ApplicationListener<AuthenticationFailureBadCredentialsEvent> {
+
+        @Autowired
+        UserServiceImpl userService;
+        @Autowired
+        LoggerService logger;
+        @Autowired
+        private HttpServletRequest request;
+
+        @Override
+        public void onApplicationEvent (AuthenticationFailureBadCredentialsEvent event) {
+            try {
+                String username = event.getAuthentication().getName();
+                logger.saveEvent(new SecurityLogs("LOGIN_FAILED", username, request.getServletPath(), request.getServletPath()));
+                User user = userService.findByUserName(username.toLowerCase());
+                if (user != null) {
+                    boolean isAdmin = false;
+                    if (user.isEnabled() && user.isAccountNonLocked()) {
+                        for (Group group : user.getUserGroups()) {
+                            if (group.getCode().equalsIgnoreCase("ROLE_ADMINISTRATOR")) {
+                                isAdmin = true;
+                            }
+                        }
+
+                        if (user.getFailedAttempt() < 4) {
+                            userService.increaseFailedAttempts(username);
+                        } else if (!isAdmin){
+                            logger.saveEvent(new SecurityLogs("BRUTE_FORCE", username, request.getServletPath(), request.getServletPath()));
+                            userService.lock(username);
+                            logger.saveEvent(new SecurityLogs("LOCK_USER", username,
+                                    "Lock user " + user.getUsername().toLowerCase(),
+                                    request.getServletPath()));
+                        }
+                    }
+                }
+            } catch (
+                    CustomNotFoundException e) {
+                //
+            }
+        }
+
+    }
+
+  learner_created: false
+- name: src/account/entity/SecurityLogs.java
+  visible: true
+  text: |
+    package account.entity;
+
+    import javax.persistence.*;
+    import java.time.LocalDateTime;
+
+    @Entity
+    @Table(name = "SECURITY_LOGS")
+    public class SecurityLogs {
+        @Id
+        @GeneratedValue(strategy = GenerationType.IDENTITY)
+        @Column(name = "ID")
+        private Long id;
+        @Column(name="DATE")
+        private LocalDateTime date = LocalDateTime.now();
+        @Column(name = "ACTION")
+        private String action;
+        @Column(name = "SUBJECT")
+        private String subject;
+        @Column(name = "OBJECT")
+        private String object;
+        @Column(name = "PATH")
+        private String path;
+
+
+        public SecurityLogs() {
+        }
+
+        public SecurityLogs(String action, String subject, String object, String path) {
+            this.action = action;
+            this.subject = subject;
+            this.object = object;
+            this.path = path;
+        }
+
+        public Long getId() {
+            return id;
+        }
+
+        public void setId(Long id) {
+            this.id = id;
+        }
+
+        public LocalDateTime getDate() {
+            return date;
+        }
+
+        public void setDate(LocalDateTime date) {
+            this.date = date;
+        }
+
+        public String getAction() {
+            return action;
+        }
+
+        public void setAction(String action) {
+            this.action = action;
+        }
+
+        public String getSubject() {
+            return subject;
+        }
+
+        public void setSubject(String subject) {
+            this.subject = subject;
+        }
+
+        public String getObject() {
+            return object;
+        }
+
+        public void setObject(String object) {
+            this.object = object;
+        }
+
+
+        public String getPath() {
+            return path;
+        }
+
+        public void setPath(String path) {
+            this.path = path;
+        }
+    }
+  learner_created: false
+- name: src/account/security/RestAuthenticationEntryPoint.java
+  visible: true
+  text: |-
+    package account.security;
+
+    import org.springframework.security.core.AuthenticationException;
+    import org.springframework.security.web.AuthenticationEntryPoint;
+    import org.springframework.stereotype.Component;
+
+    import javax.servlet.ServletException;
+    import javax.servlet.http.HttpServletRequest;
+    import javax.servlet.http.HttpServletResponse;
+    import java.io.IOException;
+
+    @Component
+    public class RestAuthenticationEntryPoint implements AuthenticationEntryPoint {
+
+
+        @Override
+        public void commence(HttpServletRequest request, HttpServletResponse response,
+                             AuthenticationException authException) throws IOException, ServletException {
+            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, authException.getMessage());
+        }
+    }
+  learner_created: false
+- name: src/account/dao/SecurityLoggerRepository.java
+  visible: true
+  text: |
+    package account.dao;
+
+    import account.entity.SecurityLogs;
+    import org.springframework.data.jpa.repository.JpaRepository;
+
+    import java.util.List;
+
+    public interface SecurityLoggerRepository extends JpaRepository<SecurityLogs, Long> {
+        List<SecurityLogs> findAllByOrderByIdAsc();
+
+    }
+  learner_created: false
+- name: src/account/payload/ChangeAccessRequest.java
+  visible: true
+  text: |
+    package account.payload;
+
+    import javax.validation.constraints.NotNull;
+
+
+    public class ChangeAccessRequest {
+        @NotNull
+        private String user;
+        @NotNull
+        private String operation;
+
+        public ChangeAccessRequest() {
+        }
+
+        public ChangeAccessRequest(String user, String operation) {
+            this.user = user;
+            this.operation = operation;
+        }
+
+        public String getOperation() {
+            return operation;
+        }
+
+        public void setOperation(String operation) {
+            this.operation = operation;
+        }
+
+        public String getUser() {
+            return user;
+        }
+
+        public void setUser(String user) {
+            this.user = user;
+        }
+
+    }
+  learner_created: false
+- name: src/account/controller/AuditorController.java
+  visible: true
+  text: |
+    package account.controller;
+
+    import account.dao.SecurityLoggerRepository;
+    import account.entity.SecurityLogs;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.http.ResponseEntity;
+    import org.springframework.web.bind.annotation.GetMapping;
+    import org.springframework.web.bind.annotation.RequestMapping;
+    import org.springframework.web.bind.annotation.RestController;
+
+    import java.util.List;
+    import java.util.Objects;
+
+
+    @RestController
+    @RequestMapping("/api/security")
+    public class AuditorController {
+
+        private final SecurityLoggerRepository securityLoggerRepository;
+
+        @Autowired
+        public AuditorController(SecurityLoggerRepository securityLoggerRepository) {
+            this.securityLoggerRepository = securityLoggerRepository;
+        }
+
+        @GetMapping("/events")
+        public ResponseEntity<Object> getEvents() {
+            List<SecurityLogs> eventsList = securityLoggerRepository.findAllByOrderByIdAsc();
+            return new ResponseEntity<>(Objects.requireNonNullElse(eventsList, "[]"), HttpStatus.OK);
+        }
+    }
+  learner_created: false
+- name: src/account/service/LoggerService.java
+  visible: true
+  text: |-
+    package account.service;
+
+    import account.dao.SecurityLoggerRepository;
+    import account.entity.SecurityLogs;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.stereotype.Service;
+
+    import java.util.List;
+
+    @Service
+    public class LoggerService {
+
+        private final SecurityLoggerRepository logger;
+
+        @Autowired
+        public LoggerService(SecurityLoggerRepository logger) {
+            this.logger = logger;
+        }
+
+        public List<SecurityLogs> getEvents() {
+            return logger.findAllByOrderByIdAsc();
+        }
+
+        public void saveEvent(SecurityLogs securityLogs) {
+            logger.save(securityLogs);
+        }
+    }
+  learner_created: false
+- name: src/account/security/AuthenticationSuccessEventListener.java
+  visible: true
+  text: |
+    package account.security;
+
+    import account.entity.User;
+    import account.service.UserServiceImpl;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.context.ApplicationListener;
+    import org.springframework.security.authentication.event.AuthenticationSuccessEvent;
+    import org.springframework.stereotype.Component;
+
+    @Component
+    public class AuthenticationSuccessEventListener implements ApplicationListener<AuthenticationSuccessEvent>
+    {
+
+        @Autowired
+        UserServiceImpl userService;
+
+        @Override
+        public void onApplicationEvent (AuthenticationSuccessEvent event) {
+            String username = event.getAuthentication().getName();
+            User user = userService.findByUserName(username);
+            if (user != null) {
+                userService.resetFailedAttempts(user.getUsername());
+            }
+        }
+    }
+  learner_created: false
+- name: test/AccountServiceTest.java
+  visible: false
+  text: |
+    import account.AccountServiceApplication;
+    import org.hyperskill.hstest.dynamic.DynamicTest;
+    import org.hyperskill.hstest.dynamic.input.DynamicTesting;
+    import org.hyperskill.hstest.exception.outcomes.WrongAnswer;
+    import org.hyperskill.hstest.mocks.web.request.HttpRequest;
+    import org.hyperskill.hstest.stage.SpringTest;
+    import org.hyperskill.hstest.testcase.CheckResult;
+
+    import javax.net.ssl.*;
+    import java.security.cert.X509Certificate;
+
+    public class AccountServiceTest extends SpringTest {
+      public AccountServiceTest() {
+        super(AccountServiceApplication.class, "../service_db.mv.db");
+      }
+
+      SSLSocket socket;
+      java.security.cert.X509Certificate[] chain;
+
+      // Warning!!! Only for testing reason, trust all certificates!
+      TrustManager[] trustAllCerts = new TrustManager[] {
+              new X509TrustManager() {
+                public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                  return new java.security.cert.X509Certificate[0];
+                }
+                public void checkClientTrusted(
+                        java.security.cert.X509Certificate[] certs, String authType) {
+                }
+                public void checkServerTrusted(
+                        java.security.cert.X509Certificate[] certs, String authType) {
+                }
+              }
+      };
+
+      // Test SSL
+      public CheckResult checkCertificateName(String nameCN) {
+        try {
+          SSLContext sc = SSLContext.getInstance("SSL");
+          //ТАК нельзя!!! доверяем всем сертификатам, только для тестирования и разработки!!!
+          sc.init(null, trustAllCerts, new java.security.SecureRandom());
+          SSLSocketFactory factory = sc.getSocketFactory();
+          HttpRequest request = get("");
+          socket = (SSLSocket) factory.createSocket(request.getHost(), request.getPort());
+          getCertificates();
+          if (findCert(nameCN)) {
+            return CheckResult.correct();
+          } else {
+            throw new WrongAnswer("Not found certificate with CN - " + nameCN);
+          }
+        } catch (Exception e) {
+          e.printStackTrace();
+          System.out.println("Connection not found");
+          throw new WrongAnswer("Can't establish https connection!");
+        }
+      }
+
+      // Get certificate chain
+      public void getCertificates() {
+        try {
+          chain = (X509Certificate[]) socket.getSession().getPeerCertificates();
+        } catch (SSLPeerUnverifiedException e) {
+          e.printStackTrace();
+          System.out.println(e.toString());
+        }
+      }
+
+
+      // Searching certificate by Common Name
+      public boolean findCert(String subject) {
+        for (java.security.cert.X509Certificate c : chain) {
+          String subjectName = c.getSubjectDN().getName();
+          System.out.println(subjectName + " " + c.getSigAlgName());
+          if (subjectName.contains("CN=" + subject)) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      @DynamicTest
+      DynamicTesting[] dt = new DynamicTesting[]{
+
+              // Check certificate name
+              () -> checkCertificateName("accountant_service"),
+      };
+    }
+  learner_created: false
+- name: src/resources/keystore/service.p12
+  visible: true
+  learner_created: true
+feedback_link: https://hyperskill.org/projects/217/stages/1092/implement#comment
+status: Solved
+feedback:
+  message: Well done! You've finished the project. Select a new project on <a href="https://hyperskill.org/projects">JetBrains
+    Academy</a> to continue learning.
+  time: Thu, 23 Dec 2021 06:19:55 UTC
+record: 5
